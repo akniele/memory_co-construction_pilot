@@ -1,0 +1,966 @@
+<!-- annotation/annotation.html -->
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Annotation</title>
+    <!-- Add bootstrap CSS for flash message styling -->
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles.css') }}">
+    
+<script>
+    let initialAnnotations = JSON.parse('{{ existing_annotations | tojson | safe }}');
+    let initialRelations = JSON.parse('{{ existing_relations | tojson | safe }}');
+</script>
+
+<script>
+        let activeTag = null;
+        let activeTRIGGER = null;
+        let annotations = [];
+        let isAskingQuestion = false;
+        const relationClassRegex = /^relation/; 
+
+        let maxSpanId = 0;
+        let maxRelationId = 0;
+        for (const annotation of initialAnnotations) {
+        const match = annotation.id.match(/\d+/);
+        if (match) {
+            maxSpanId = Math.max(maxSpanId, parseInt(match[0]));
+        }
+
+        if (annotation.relationId) {
+            const relationMatch = annotation.relationId.match(/\d+/);
+            if (relationMatch) {
+            maxRelationId = Math.max(maxRelationId, parseInt(relationMatch[0]));
+            }
+        }
+        }
+
+        let spanId = maxSpanId + 1;
+        let relationId = maxRelationId + 1;
+
+        const labelTags = ["SHOULDBEOVERLAP", "SHOULDBECOMP1", "SHOULDBECOMP2", "SHOULDBECONFL", "MISSINGOVERLAP", "MISSINGCOMP1", "MISSINGCOMP2", "MISSINGCONFL", "HALLUCINATION", "OTHER", "DUMMY"];
+        const relationTags = ["RELATION"];
+
+        let relationSpans = []; 
+        let currentRelation = [];
+        let relationMode = false;
+
+        // IF THE USER IS CLICKING ON A TAG THAT IS NOT THE TRIGGER ANSWER,
+        // REMOVE THE TYPE-IN QUESTION BOX
+        function setActiveTag(tag) {
+            let questionContainer = document.getElementById("question-container");
+            if (activeTag == "{{trigger}}" && tag !== "{{trigger}}" && questionContainer.innerHTML !== '') {
+                    alert("Please answer and save the question first.");
+                    askQuestion(activeTRIGGER.text, null);
+            } else {
+                activeTag = tag;
+            if ("{{type_in_question }}"!=='None' && tag !== "{{trigger}}") {
+            let questionContainer = document.getElementById("question-container");
+            questionContainer.innerHTML = '';
+            }
+            }
+            }
+
+        function findTextNode(parentElement, offset) {
+            const walker = document.createTreeWalker(
+                parentElement,
+                NodeFilter.SHOW_TEXT,
+                null,
+                false
+            );
+
+            let node;
+            let totalLength = 0;
+
+            while (node = walker.nextNode()) {
+                totalLength += node.textContent.length;
+                if (totalLength >= offset) {
+                    return {
+                        node: node,
+                        innerOffset: offset - (totalLength - node.textContent.length)
+                    };
+                }
+            }
+
+            return null; // offset not found within the parentElement text nodes
+        }
+
+        // RELATION FUNCTIONALITY
+        function toggleRelationMode() {
+            if (activeTag === "RELATION") {
+                activeTag = null;
+                updateRelationButton();
+                saveCurrentRelation();
+
+                if (currentRelation.length === 0) {
+                    return;
+                }
+
+                  // Add the relation class to the spans in the currentRelation
+                  currentRelation.forEach(span => {
+                    const spanElement = document.getElementById(span.id);
+                    if (spanElement) {
+                        spanElement.classList.add('relation' + relationId.toString());
+                    }
+                });
+                
+
+                const selectedSpanIds = currentRelation.map(annotation => annotation.id); // Extract span IDs
+                const updatedAnnotations = [];
+
+                // Loop through existing annotations
+                for (let annotation of annotations) {
+                    const isRelated = selectedSpanIds.includes(annotation.id);
+
+                    if (isRelated) {
+                    // Remove the annotation from the original array
+                    annotations.splice(annotations.indexOf(annotation), 1);
+                    } else {
+                    // Keep annotations not related to the selected spans
+                    updatedAnnotations.push(annotation);
+                    }
+                }
+
+                  // Update the annotations with the relation ID
+                for (let annotation of currentRelation) {
+                    annotation.relationId = 'relation' + relationId.toString();
+                    updatedAnnotations.push(annotation); // Push updated annotation back to the array
+                }
+
+                // Replace the original annotations array with the updated version
+                annotations = updatedAnnotations;
+
+                relationId ++;
+                currentRelation = [];
+                
+            } else {
+                activeTag = "RELATION";
+            }
+            updateRelationButton();
+        }
+
+        function updateRelationButton() {
+            const relationButton = document.getElementById('annotate-relations-button');
+            if (activeTag === "RELATION") {
+                relationButton.textContent = 'End the relation';
+            } else {
+                relationButton.textContent = 'Annotate a relation';
+            }
+        }
+
+        function saveCurrentRelation() {
+            if (currentRelation.length > 0) {
+                let whichTextElements = new Set([]);
+                for (const span of currentRelation) {
+                    whichTextElements.add(span.textElementId);
+                }
+                relationSpans.push(currentRelation);
+                document.getElementById('relations').value = JSON.stringify(relationSpans);
+            }
+            
+        }
+        
+
+        document.addEventListener("DOMContentLoaded", function() {
+
+            let containerElement = document.getElementById("annotation-container");
+            let questionElement = containerElement.querySelector('.instruction');
+            let redoButton = document.getElementById("redo-button");
+            redoButton.addEventListener("click", redoAnnotations);
+
+            let redoRelationButton = document.getElementById("redorelation-button");
+            redoRelationButton.addEventListener("click", redoRelationAnnotation);
+
+            let redoExplanationButton = document.getElementById("change-explanation");
+            redoExplanationButton.addEventListener("click", redoExplanation);
+
+            let textElement1 = document.getElementById("text1");
+            let textElement2 = document.getElementById("text2");
+            let textElement3 = document.getElementById("summary");
+    
+            textElements = [textElement1, textElement2, textElement3];
+
+            for (let textElement of textElements) {
+                    // Render initial annotations
+                for (let annotation of initialAnnotations) {
+                    if (annotation.textElementId !== textElement.id) continue; // Skip annotations not belonging to this text element
+                    let fullText = textElement.innerText;
+                    console.log("annotation: ", annotation);
+
+                    let {node: startNode, innerOffset: startOffset} = findTextNode(textElement, annotation.start);
+                    let {node: endNode, innerOffset: endOffset} = findTextNode(textElement, annotation.end);
+
+                    let range = document.createRange();
+                    range.setStart(startNode, startOffset);
+                    range.setEnd(endNode, endOffset);
+
+                    let span = document.createElement("span");
+                    span.className = annotation.tag;
+                    span.setAttribute("id", annotation.id);
+                    span.classList.add(annotation.relationId);
+                    span.appendChild(document.createTextNode(annotation.text));
+                    range.deleteContents();
+                    range.insertNode(span);
+
+                    // STORE THE ANNOTATION IN THE ARRAY
+                    annotations.push(annotation);
+                }
+
+                for (const relation of initialRelations) {
+                    const spans = [];
+                    for (const spanData of relation) {
+
+                        const existingSpan = relationSpans.find(existingRelation => {
+                            return existingRelation.some(existingSpan => existingSpan.id === spanData.id);
+                            });
+
+                        if (existingSpan) {
+                        break;
+                        }
+                        spans.push(spanData);
+                    }
+                    if (spans.length > 0) {
+                        let thisRelation = [];
+                        for (const span of spans) {
+                            let myspan = null
+                            myspan = {
+                                start: span.start,
+                                end: span.end,
+                                text: span.text,
+                                tag: span.tag,
+                                TypedInAnswer: span.TypedInAnswer,
+                                textElementId: span.textElementId,
+                                id: span.id,
+                                relationId: span.relationId
+                            };
+                            thisRelation.push(myspan);  
+                        }
+                     relationSpans.push(thisRelation);
+                    }
+                }
+
+                
+                // Get new annotations
+                textElement.addEventListener("mouseup", function() {
+                    if (activeTag && labelTags.includes(activeTag)) {
+                        let questionContainer = document.getElementById("question-container");
+                        if (activeTag == "{{trigger}}" && questionContainer.innerHTML !== '') {
+                            alert("Please answer the question first.");
+                            askQuestion(activeTRIGGER.text, null);
+                            return;
+                        } 
+                        let selection = window.getSelection();
+                        let selectedText = selection.toString();
+                        if (/\n/.test(selectedText)) {
+                            alert("Please do not select text across multiple lines.");
+                            return;
+                        }
+
+                        if (selectedText.trim() === '') {
+                        // If selected text is empty, ignore the event (if user just randomly clicked)
+                            return;
+                        }
+
+                        const myRange = selection.getRangeAt(0);
+
+                        for (let otherTextElement of textElements) {
+                            if (otherTextElement !== textElement) {
+                                const intersectsOtherElement = myRange.intersectsNode(otherTextElement, true);
+                                if (intersectsOtherElement) {
+                                    alert('You cannot select text across different text elements.');
+                                    selection.removeAllRanges(); // Clear the selection
+                                    return;
+
+                                    }
+                                }
+                        }
+                        
+
+                        // Calculate start and end offsets relative to the parent text element
+                        let startOffset = 0;
+                        let endOffset = 0;
+                        let foundStart = false;
+
+                        function calculateOffsets(node, offset) {
+                            if (node === myRange.startContainer) {
+                                startOffset = offset + myRange.startOffset;
+                                foundStart = true;
+                            }
+                            if (node === myRange.endContainer) {
+                                endOffset = offset + myRange.endOffset;
+                                return;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                offset += node.textContent.length;
+                            } else {
+                                for (let child of node.childNodes) {
+                                    calculateOffsets(child, offset);
+                                    if (foundStart && endOffset > 0) return;
+                                    offset += child.textContent.length;
+                                }
+                            }
+                        }
+
+                        calculateOffsets(textElement, 0);
+                        
+
+                        // PREVENT SPAN OVERLAPS
+                        for (let annotation of annotations.filter(a => a.textElementId === textElement.id)) {
+                            if ((startOffset >= annotation.start && startOffset < annotation.end) || 
+                                (endOffset > annotation.start && endOffset <= annotation.end) ||
+                                (startOffset <= annotation.start && endOffset >= annotation.end)) {
+                                alert("Spans should not overlap");
+                                return;
+                            }
+                        }
+
+                        let range = selection.getRangeAt(0);
+                        let span = document.createElement("span");
+                        span.setAttribute("id", "span" + spanId.toString());
+                        span.className = activeTag;
+                        spanId++;
+                        span.appendChild(document.createTextNode(selectedText));
+                        range.deleteContents();
+                        range.insertNode(span);
+
+                        // HERE'S HOW THE ANNOTATION IS STORED
+                        let annotation = {
+                            start: startOffset,
+                            end: endOffset,
+                            text: selectedText,
+                            tag: activeTag,
+                            TypedInAnswer: '',
+                            textElementId: textElement.id,
+                            id: span.id,
+                        };
+                        
+                        // ASK THE TYPE-IN QUESTION IN CASE OF TRIGGER ANSWER
+                        if ("{{type_in_question}}"!=='None' && activeTag === "{{trigger}}") {
+                            activeTRIGGER = annotation;
+                            askQuestion(selectedText, null);
+                        }
+                
+                        annotations.push(annotation);
+                    }
+                    else if (activeTag && relationTags.includes(activeTag)) {
+                        let selection = window.getSelection();
+                        let selectedText = selection.toString();
+
+                        if (selectedText.trim() === '') {
+                            // If selected text is empty, ignore the event (if user just randomly clicked)
+                            return;
+                        }
+
+                        const myRange = selection.getRangeAt(0);
+
+                        for (let otherTextElement of textElements) {
+                            if (otherTextElement !== textElement) {
+                                const intersectsOtherElement = myRange.intersectsNode(otherTextElement, true);
+                                if (intersectsOtherElement) {
+                                    alert('You cannot select text across different text elements.');
+                                    selection.removeAllRanges(); // Clear the selection
+                                    return;
+                                }
+                            }
+                        }
+
+                        let fullText = textElement.innerText;
+
+                        // Calculate start and end offsets relative to the parent text element
+                        let startOffset = 0;
+                        let endOffset = 0;
+                        let foundStart = false;
+
+                        function calculateOffsets(node, offset) {
+                            if (node === myRange.startContainer) {
+                                startOffset = offset + myRange.startOffset;
+                                foundStart = true;
+                            }
+                            if (node === myRange.endContainer) {
+                                endOffset = offset + myRange.endOffset;
+                                return;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                offset += node.textContent.length;
+                            } else {
+                                for (let child of node.childNodes) {
+                                    calculateOffsets(child, offset);
+                                    if (foundStart && endOffset > 0) return;
+                                    offset += child.textContent.length;
+                                }
+                            }
+                        }
+
+                        calculateOffsets(textElement, 0);
+
+                        // Ensure the new span overlaps with an already labeled span
+                        let overlappingAnnotation = annotations.find(annotation => 
+                            annotation.textElementId === textElement.id &&
+                            ((startOffset >= annotation.start && startOffset < annotation.end) || 
+                            (endOffset > annotation.start && endOffset <= annotation.end) ||
+                            (startOffset <= annotation.start && endOffset >= annotation.end))
+                        );
+
+                        if (!overlappingAnnotation) {
+                            alert("New span must overlap with an already labeled span.");
+                            return;
+                        }
+
+                        // Store the overlapping span in the relationSpans array
+                        currentRelation.push(overlappingAnnotation);
+
+                    }
+
+                    else if (activeTag == "redoAnnotation") {
+                        let selection = window.getSelection();
+                        let selectedText = selection.toString();
+
+                        if (selectedText.trim() === '') {
+                            // If selected text is empty, ignore the event (if user just randomly clicked)
+                            return;
+                        }
+
+                        const myRange = selection.getRangeAt(0);
+
+                        for (let otherTextElement of textElements) {
+                            if (otherTextElement !== textElement) {
+                                const intersectsOtherElement = myRange.intersectsNode(otherTextElement, true);
+                                if (intersectsOtherElement) {
+                                    alert('You cannot select text across different text elements.');
+                                    selection.removeAllRanges(); // Clear the selection
+                                    return;
+                                }
+                            }
+                        }
+
+                        let fullText = textElement.innerText;
+
+                        // Calculate start and end offsets relative to the parent text element
+                        let startOffset = 0;
+                        let endOffset = 0;
+                        let foundStart = false;
+
+                        function calculateOffsets(node, offset) {
+                            if (node === myRange.startContainer) {
+                                startOffset = offset + myRange.startOffset;
+                                foundStart = true;
+                            }
+                            if (node === myRange.endContainer) {
+                                endOffset = offset + myRange.endOffset;
+                                return;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                offset += node.textContent.length;
+                            } else {
+                                for (let child of node.childNodes) {
+                                    calculateOffsets(child, offset);
+                                    if (foundStart && endOffset > 0) return;
+                                    offset += child.textContent.length;
+                                }
+                            }
+                        }
+
+
+                        calculateOffsets(textElement, 0);
+
+                        // Ensure the new span overlaps with an already labeled span
+                        let overlappingAnnotation = annotations.find(annotation => 
+                            annotation.textElementId === textElement.id &&
+                            ((startOffset >= annotation.start && startOffset < annotation.end) || 
+                            (endOffset > annotation.start && endOffset <= annotation.end) ||
+                            (startOffset <= annotation.start && endOffset >= annotation.end))
+                        );
+
+                        if (!overlappingAnnotation) {
+                            alert("Span to be removed must overlap with an already labeled span.");
+                            return;
+                        }
+
+                        let spanElement = document.getElementById(overlappingAnnotation.id);
+
+                        let parent = spanElement.parentNode;
+
+
+                        while (spanElement.firstChild) {
+                            parent.insertBefore(spanElement.firstChild, spanElement);
+                        }
+                        parent.removeChild(spanElement);
+
+                        annotations = annotations.filter(annotation => annotation.id !== overlappingAnnotation.id);
+
+
+                        // Show the question prompt
+                        let questionContainer = document.getElementById("question-container");
+                        questionContainer.style.display = "block";
+
+                        document.getElementById("redo-button").value = "true";
+                        
+                        // Reset the form submission
+                        // Prevent form submission
+                        let form = document.getElementById("my-form-id");
+                        let formClone = form.cloneNode(true);
+                        form.parentNode.replaceChild(formClone, form);
+
+                        // Reattach the event listener to the redo button
+                        let redoButton = document.getElementById("redo-button");
+                        redoButton.addEventListener("click", redoAnnotations);
+
+                    } else if (activeTag == "redoRelationAnnotation") {
+
+                        let selection = window.getSelection();
+                        let selectedText = selection.toString();
+
+                        if (selectedText.trim() === '') {
+                            // If selected text is empty, ignore the event (if user just randomly clicked)
+                            return;
+                        }
+
+                        const myRange = selection.getRangeAt(0);
+
+                        for (let otherTextElement of textElements) {
+                            if (otherTextElement !== textElement) {
+                                const intersectsOtherElement = myRange.intersectsNode(otherTextElement, true);
+                                if (intersectsOtherElement) {
+                                    alert('You cannot select text across different text elements.');
+                                    selection.removeAllRanges(); // Clear the selection
+                                    return;
+                                }
+                            }
+                        }
+
+                        let fullText = textElement.innerText;
+
+                        // Calculate start and end offsets relative to the parent text element
+                        let startOffset = 0;
+                        let endOffset = 0;
+                        let foundStart = false;
+
+                        function calculateOffsets(node, offset) {
+                            if (node === myRange.startContainer) {
+                                startOffset = offset + myRange.startOffset;
+                                foundStart = true;
+                            }
+                            if (node === myRange.endContainer) {
+                                endOffset = offset + myRange.endOffset;
+                                return;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                offset += node.textContent.length;
+                            } else {
+                                for (let child of node.childNodes) {
+                                    calculateOffsets(child, offset);
+                                    if (foundStart && endOffset > 0) return;
+                                    offset += child.textContent.length;
+                                }
+                            }
+                        }
+
+                        calculateOffsets(textElement, 0);
+
+                        // Ensure the new span overlaps with an already labeled span
+                        let overlappingAnnotation = annotations.find(annotation => 
+                            annotation.textElementId === textElement.id &&
+                            ((startOffset >= annotation.start && startOffset < annotation.end) || 
+                            (endOffset > annotation.start && endOffset <= annotation.end) ||
+                            (startOffset <= annotation.start && endOffset >= annotation.end))
+                        );
+
+                        if (!overlappingAnnotation) {
+                            alert("Span must overlap with an already labeled span.");
+                            return;
+                        }
+
+                        let spanElement = document.getElementById(overlappingAnnotation.id);
+
+                        // go through annotations array, find the correct span, check if it has a relationId. If it does, remove the relationId from this span as well as from all other spans that have this relationId.
+                        // Then remove the relation from relationSpans array.
+
+                        relation_id = overlappingAnnotation.relationId;
+
+                        annotations.forEach(annotation => {
+                            if (annotation.relationId === relation_id) {
+                                delete annotation.relationId;
+                            }
+                        });
+
+                        // remove the relation from relationSpans array.
+                        let relationToRemove = relationSpans.find(relation => relation.some(span => span.id === overlappingAnnotation.id));
+
+                        relationSpans = relationSpans.filter(relation => relation !== relationToRemove);
+
+
+                        // also remove relationid from all span Elements that have this relationId
+
+                        let spansToRemoveRelationId = document.querySelectorAll(`span.${relation_id}`);
+
+                        spansToRemoveRelationId.forEach(span => {
+                            span.classList.remove(relation_id);
+                        });
+
+                    } else if (activeTag == "redoExplanation") {
+
+                        let selection = window.getSelection();
+                        let selectedText = selection.toString();
+
+                        if (selectedText.trim() === '') {
+                            // If selected text is empty, ignore the event (if user just randomly clicked)
+                            return;
+                        }
+
+                        const myRange = selection.getRangeAt(0);
+
+                        for (let otherTextElement of textElements) {
+                            if (otherTextElement !== textElement) {
+                                const intersectsOtherElement = myRange.intersectsNode(otherTextElement, true);
+                                if (intersectsOtherElement) {
+                                    alert('You cannot select text across different text elements.');
+                                    selection.removeAllRanges(); // Clear the selection
+                                    return;
+                                }
+                            }
+                        }
+
+                        let fullText = textElement.innerText;
+
+                        // Calculate start and end offsets relative to the parent text element
+                        let startOffset = 0;
+                        let endOffset = 0;
+                        let foundStart = false;
+
+                        function calculateOffsets(node, offset) {
+                            if (node === myRange.startContainer) {
+                                startOffset = offset + myRange.startOffset;
+                                foundStart = true;
+                            }
+                            if (node === myRange.endContainer) {
+                                endOffset = offset + myRange.endOffset;
+                                return;
+                            }
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                offset += node.textContent.length;
+                            } else {
+                                for (let child of node.childNodes) {
+                                    calculateOffsets(child, offset);
+                                    if (foundStart && endOffset > 0) return;
+                                    offset += child.textContent.length;
+                                }
+                            }
+                        }
+
+
+                        calculateOffsets(textElement, 0);
+
+                        // Ensure the new span overlaps with an already labeled span
+                        let overlappingAnnotation = annotations.find(annotation => 
+                            annotation.textElementId === textElement.id &&
+                            ((startOffset >= annotation.start && startOffset < annotation.end) || 
+                            (endOffset > annotation.start && endOffset <= annotation.end) ||
+                            (startOffset <= annotation.start && endOffset >= annotation.end))
+                        );
+
+                        if (!overlappingAnnotation) {
+                            alert("Span must overlap with an already labeled span.");
+                            return;
+                        }
+
+                        if (overlappingAnnotation.tag === "{{trigger}}") {
+
+                            askQuestion(overlappingAnnotation, true);
+                            document.getElementById("TypedInAnswerInput").value = overlappingAnnotation.TypedInAnswer; // Set the value of input field to the existing typedInAnswer     
+                        }
+                    }
+                    
+                });
+
+
+                textElement.addEventListener('mouseover', (event) => {
+                    if (event.target.tagName === 'SPAN') {
+                        // Check for existence and presence of the 'highlighted' class
+                        if (event.target.classList.contains('highlighted')) {
+                            const relationClass = event.target.classList[1]; // Optional: Get relation class if needed
+                            const spans = document.querySelectorAll(`span.${relationClass}`);
+                            spans.forEach(span => span.classList.remove('highlighted'));
+                        } else {
+                            if (event.target.classList.length > 0) {
+                                for (const className of event.target.classList) {
+                                    if (relationClassRegex.test(className)) {
+                                        const spans = document.querySelectorAll(`span.${className}`);
+                                        spans.forEach(span => span.classList.add('highlighted'));
+                                    break;
+                                    }
+                                }
+                                }
+                        }
+                    }
+                });
+
+
+                textElement.addEventListener('mouseleave', () => {
+                for (let textEl of textElements) {
+                    const highlightedSpans = textEl.querySelectorAll('span.highlighted');
+
+                    if (highlightedSpans.length >= 1) {
+                        highlightedSpans.forEach(span => {
+                        span.classList.remove('highlighted');
+                        });    
+                }   
+                }
+                });
+
+                // SAVE TypedInAnswer FOR THE CURRENT TRIGGER SPAN
+                textElement.addEventListener("click", function(e) {
+                    if ("{{type_in_question}}"!=='None' && e.target.className === "{{trigger}}") {
+                        activeTag = 'TypedInAnswer';
+                        activeTRIGGER = annotations.find(annotation => annotation.text === e.target.innerText);
+                        if (!activeTRIGGER.TypedInAnswer) {
+                            activeTRIGGER.TypedInAnswer = '';
+                        }
+                        askQuestion(e.target.innerText, null); // Ask question again
+                        document.getElementById("TypedInAnswerInput").value = activeTRIGGER.TypedInAnswer; // Set the value of input field to the existing typedInAnswer
+                    }
+                });
+            };
+        });
+
+        //function askQuestion(selectedText, existingExplanation) {
+        function askQuestion(overlappingAnnotation, previousTypedInAnswer) {
+            if ("{{type_in_question}}" !== 'None') {
+                let questionContainer = document.getElementById("question-container");
+
+                if (overlappingAnnotation.TypedInAnswer) {
+                    questionContainer.innerHTML = `
+                    <p class="instruction" id="question_instruction">{{ type_in_question}}</p>
+                        <input type="text" id="TypedInAnswerInput" placeholder=${overlappingAnnotation.TypedInAnswer} oninput="updateTypedInAnswer(this.value)">
+                        <button id="saveAnswerButton">Save</button>
+                    `; }
+                else {
+                    questionContainer.innerHTML = `
+                        <p class="instruction" id="question_instruction">{{ type_in_question}}</p>
+                            <input type="text" id="TypedInAnswerInput" placeholder="Type here" oninput="updateTypedInAnswer(this.value)">
+                            <button id="saveAnswerButton">Save</button>
+                        `;}
+
+                // Get a reference to the paragraph element
+                const paragraph = document.getElementById("question_instruction");
+                // Change the font color to red
+                paragraph.style.color = "red";
+
+                document.getElementById("saveAnswerButton").addEventListener("click", function() {
+                let TypedInAnswerValue = document.getElementById("TypedInAnswerInput").value;
+                console.log("clicked, and the value is:", TypedInAnswerValue);
+
+                let cleanedTypedInAnswerValue = TypedInAnswerValue.replace(/\n/g, '');
+                cleanedTypedInAnswerValue = cleanedTypedInAnswerValue.replace(/[^a-zA-Z0-9 ]/g, '');
+
+                if (cleanedTypedInAnswerValue.trim() === '') {
+                    alert('Please type an answer before saving.');
+                    return;
+                }
+
+                if (previousTypedInAnswer) {
+                    for (let annotation of annotations) {
+                                if (annotation.id === overlappingAnnotation.id) {
+                                    console.log("we have a match!")
+                                    annotation.TypedInAnswer = cleanedTypedInAnswerValue;
+                                }
+
+                            }
+
+                    console.log("annotations after removal:", annotations);
+                    alert('Answer saved successfully.');
+                    questionContainer.innerHTML = '';
+                }
+                else {
+                    updateTypedInAnswer(cleanedTypedInAnswerValue);
+                    alert('Answer saved successfully.');
+                    questionContainer.innerHTML = '';
+                }
+            });
+        }}
+    
+        function updateTypedInAnswer(TypedInAnswerValue) {
+            if ("{{type_in_question}}" !== 'None' && activeTRIGGER) {
+                activeTRIGGER.TypedInAnswer = TypedInAnswerValue;
+            }
+        }
+
+        function setAnnotationsAndSubmit(e) {
+            let triggerWithoutTypedInAnswerExists = annotations.some(annotation => annotation.tag === "{{trigger}}" && !annotation.TypedInAnswer);
+
+            if (triggerWithoutTypedInAnswerExists) {
+                alert('WARNING: You did not type in a required answer.');
+                e.preventDefault();
+                return; // Do not proceed with form submission.
+            }
+
+            const annotationInput = document.querySelector('#annotations');
+            const relationsInput = document.querySelector('#relations');
+
+            console.log("relationsInput:", relationsInput);
+            for (let relation of relationSpans) {
+                console.log("Relation:", relation);
+                for (let span of relation) {
+                    console.log("Span:", span);
+                }
+            }
+            
+            const dataToSubmit = {
+                annotations: annotations,
+                relations: relationSpans
+            };
+
+            console.log("Data before setting:", dataToSubmit);
+            annotationInput.value = JSON.stringify(annotations);
+            relationsInput.value = JSON.stringify(relationSpans.length ? relationSpans : []);
+
+            console.log("Data after setting:", dataToSubmit);
+            e.target.form.submit();
+        }
+
+        function redoAnnotations() {
+            console.log("redoAnnotations button pressed")
+
+            if (annotations.length === 0) {
+                alert("No annotations to remove.");
+                return;
+            }
+            else {
+                activeTag = "redoAnnotation";
+            }
+            }
+
+
+        function redoRelationAnnotation() {
+            console.log("redoRelationAnnotation button pressed")
+
+            if (relationSpans.length === 0) {
+                alert("No relations to remove.");
+                return;
+            }
+            else {
+                activeTag = "redoRelationAnnotation";
+            }
+            }
+
+        function redoExplanation() {
+            activeTag = "redoExplanation";
+        }
+
+</script>
+       
+    
+</head>
+<body>
+    <div class="navbar">
+        <h1>{{annotation_title}}</h1>
+        <a href="{{ url_for('static', filename=guidelines_file) }}">Guidelines</a>
+
+        
+        <div class="progress-bar">
+            <div id="progress" class="progress-bar-fill" style="width: {{ (current_item/total_items)*100 }}%;"></div>
+        </div>
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <div class="flash-messages">
+                {% for message in messages %}
+                    <p>{{ message }}</p>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    </div>
+
+
+    <div class="container">
+        <div class="row flex-container">
+            <div class="col-xs-6 flex-item">
+                <p id="text1">{{ text1 }}</p>
+            </div>
+            <div class="col-xs-6 flex-item">
+               <p id="text2">{{ text2 }}</p>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-xs-12">
+                <pre id="summary">{{ summary }}</pre>
+            </div>
+        </div>
+    
+    </div>
+
+    <div class="container">
+        <div id="question-container"></div>
+        </div>
+
+
+    <div id="annotation-container" class="container">
+        <p class="instruction">{{ span_question | safe}}</p>
+
+        <p>Labels for annotating the summary:</p>
+        <button class="button-SHOULDBEOVERLAP common-button" onclick="setActiveTag('SHOULDBEOVERLAP')">should be in overlap</button>
+        <button class="button-SHOULDBECOMP1 common-button" onclick="setActiveTag('SHOULDBECOMP1')">should be in comp1</button>
+        <button class="button-SHOULDBECOMP2 common-button" onclick="setActiveTag('SHOULDBECOMP2')">should be in comp2</button>
+        <button class="button-SHOULDBECONFL common-button" onclick="setActiveTag('SHOULDBECONFL')">should be in confl</button>
+        <button class="button-HALLUCINATION common-button" onclick="setActiveTag('HALLUCINATION')">hallucination</button>
+        <p>Labels for annotating the source texts:</p>
+        <button class="button-MISSINGOVERLAP common-button" onclick="setActiveTag('MISSINGOVERLAP')">missing in overlap</button>
+        <button class="button-MISSINGCOMP1 common-button" onclick="setActiveTag('MISSINGCOMP1')">missing in comp1</button>
+        <button class="button-MISSINGCOMP2 common-button" onclick="setActiveTag('MISSINGCOMP2')">missing in comp2</button>
+        <button class="button-MISSINGCONFL common-button" onclick="setActiveTag('MISSINGCONFL')">missing in confl</button>
+        <p>Labels to support the annotation:</p>
+        <button class="button-OTHER common-button" onclick="setActiveTag('OTHER')">other</button>
+        <button class="button-DUMMY common-button" onclick="setActiveTag('DUMMY')">already checked</button>
+        <p>Create relations:</p>
+        <button type="button" id="annotate-relations-button" class="submit submit-relations common-button" onclick="toggleRelationMode()">annotate a relation</button>
+
+    </div>
+
+    <style>
+        {% for tag_short, tag_long, tag_color in tags %}
+        .{{ tag_short }} { background-color: {{ tag_color }}; }
+        .button-{{ tag_short }} { background-color: {{ tag_color }}; }
+        {% endfor %}
+        .common-button {
+            padding: 10px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        #annotate-relations-button {
+            background-color: #ffffff;
+            color: black;
+            border: 1px solid black;
+        }
+
+        #question-container {
+            margin-bottom: 20px;
+        }
+
+        .bold {
+            font-weight: bold;
+        }
+        .highlighted {
+            font-weight: bold;
+        }
+    </style>
+
+    <form id="my-form-id" method="POST">
+        <input type="hidden" id="annotations" name="annotations">
+        <input type="hidden" id="relations" name="relations">
+        <button type="submit" name="action" value="back" class="submit submit-back" {% if prev_index < 0 %}disabled style="opacity: 0;"{% endif %} onclick="setAnnotationsAndSubmit(event)">back</button>
+
+        <button type="submit" name="action" value="next" class="submit submit-next" onclick="setAnnotationsAndSubmit(event)">next</button>
+        <button type="button" id="redo-button" class="submit submit-redo">remove label</button>
+        <button type="button" id="redorelation-button" class="submit submit-redo-relation">remove relation</button>"
+        <button type="button" id="change-explanation" class="submit submit-explanation" onclick="redoExplanation()">change explanations</button>
+
+        <img src="/scripts/static/logout.png" id="logout-image">
+        <button type="submit" name="action" value="logout" class="submit submit-logout" onclick="setAnnotationsAndSubmit(event)">logout</button>
+    </form>
+
+</body>
+</html>
