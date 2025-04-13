@@ -73,6 +73,7 @@ for folder in files:
 
         relation_data = data['Relations']
 
+        # only works for relations with max two spans
         for item in relation_data.values():
             number = item[0]['tag']
             results_relations[folder][file][number] += 1
@@ -88,17 +89,6 @@ for folder in files:
  # annotator created a relation with between spans with two different labels (shouldn't happen)
 results["participant4"]["textID-2.json"]["SHOULDBECONFL"] += 1
 results["participant4"]["textID-2.json"]["OTHER"] += 1
-
-
-print(type(results))
-print(type(results["participant4"]))
-
-
-print("results\n")
-print(results["participant2"]["textID-1.json"])
-
-print("results_relations\n")
-print(results_relations["participant2"]["textID-1.json"])
 
 
 full = {"participant1": ["textID-0.json", "textID-2.json", "textID-4.json"], "participant2": ["textID-1.json", "textID-3.json"], "participant3" : ["textID-0.json", "textID-2.json", "textID-4.json"], "participant4" : ["textID-1.json", "textID-3.json"]} 

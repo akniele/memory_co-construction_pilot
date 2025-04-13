@@ -70,6 +70,8 @@ for file in files_participant_1:
         text = item['text']
         element = item['textElementId']
 
+        found = False
+
         for item2 in annotator_1.values():
                 start_2 = item2['start']
                 end_2 = item2['end']
@@ -77,11 +79,11 @@ for file in files_participant_1:
                 element2 = item2['textElementId']
                 if element == element2:
                     if (max(start, start_2) - min(end, end_2)) <= 0:
+                        found = True
                         print(f"found overlap: {text} and {text_2}")
                         e += 1
-                        break
-        
-        c += 1
+        if not found:
+            c += 1
 
 print(f"positive/positive: {a}")
 print(f"positive/negative: {b}")
