@@ -14,4 +14,4 @@ This version of the tool includes a number of additional features / changes:
 - Annotators can pick any individual annotation and remove it
 - Annotators can change the explanation they have given for choosing the OTHER tag
 - Annotations created on the current sample are saved when the user navigates to a previous sample
-- The samples the tool excepts should contain three text fields (Text1, Text2, Summary) instead of one
+- The samples the tool accepts should contain three text fields (Text1, Text2, Summary) instead of one
